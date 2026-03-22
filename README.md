@@ -6,10 +6,10 @@ AI-powered documentation audit tool: finds gaps, duplicates, and outdated conten
 
 Engineering teams lose **~30% of their time** searching for information scattered across Confluence, GitHub wikis, Notion, and internal docs. But the real problem isn't search — it's that nobody knows:
 
-- Which topics have **no documentation at all** (gaps)
-- Which docs **say different things** about the same topic (contradictions)
-- Which docs **haven't been updated** in months while the code changed (staleness)
-- Which docs are **near-duplicates** wasting maintenance effort
+- which topics have **no documentation at all** (gaps);
+- which docs **say different things** about the same topic (contradictions);
+- which docs **haven't been updated** in months while the code changed (staleness);
+- which docs are **near-duplicates** wasting maintenance effort.
 
 Existing tools help you *find* docs. This tool tells you **what's wrong with them**.
 
@@ -64,22 +64,25 @@ flowchart TD
 ## Features
 
 ### Available Now
-- **Document ingestion** — load Markdown, PDF, and RST files from local directories
-- **Smart chunking** — splits by headings and semantic boundaries, not arbitrary character counts
-- **Semantic search** — ask questions in natural language, get answers with source references
-- **QA chat** — conversational interface with context memory
+
+- **document ingestion** — load Markdown, PDF, and RST files from local directories;
+- **smart chunking** — splits by headings and semantic boundaries, not arbitrary character counts;
+- **semantic search** — ask questions in natural language, get answers with source references;
+- **QA chat** — conversational interface with context memory.
 
 ### In Progress
-- **Gap detection** — analyzes user queries to find undocumented topics
-- **Duplicate finder** — identifies docs with >70% semantic overlap
-- **Staleness checker** — flags docs that reference changed code/APIs
-- **Coverage report** — visual dashboard of documentation health
+
+- **gap detection** — analyzes user queries to find undocumented topics;
+- **duplicate finder** — identifies docs with >70% semantic overlap;
+- **staleness checker** — flags docs that reference changed code / APIs;
+- **coverage report** — visual dashboard of documentation health.
 
 ### Planned
-- Multi-source ingestion (Confluence API, GitHub repos)
-- Automated re-indexing on git push (n8n / GitHub Actions)
-- Team analytics (who asks what, trending questions)
-- Self-hosted and SaaS options
+
+- multi-source ingestion (Confluence API, GitHub repos);
+- automated re-indexing on git push (n8n / GitHub Actions);
+- team analytics (who asks what, trending questions);
+- self-hosted and SaaS options.
 
 ## Tech Stack
 
@@ -127,8 +130,9 @@ ai-knowledge-agent/
 ## Quick Start
 
 ### Prerequisites
-- Python 3.11+
-- OpenAI API key (or Ollama for local LLM)
+
+- Python 3.11+;
+- OpenAI API key (or Ollama for local LLM).
 
 ### Installation
 
@@ -192,11 +196,11 @@ docker-compose up
 
 This project is in early development. If you're interested in contributing:
 
-1. Open an issue to discuss what you'd like to work on
-2. Fork the repo
-3. Create a feature branch (`git checkout -b feature/your-feature`)
-4. Commit your changes
-5. Open a pull request
+1. Open an issue to discuss what you'd like to work on.
+2. Fork the repo.
+3. Create a feature branch (`git checkout -b feature/your-feature`).
+4. Commit your changes.
+5. Open a pull request.
 
 ## License
 
