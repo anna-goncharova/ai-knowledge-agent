@@ -2,16 +2,31 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+)
 from pydantic import BaseModel, Field
 
 from src.embedder import DEFAULT_COLLECTION_NAME, DEFAULT_EMBEDDING_MODEL, Embedder
 from src.qa_chain import DEFAULT_CHAT_MODEL, QAChain
 from src.search import DEFAULT_TOP_K, SearchResult, SemanticSearcher
 from src.text_chunker import chunk_text
+
+SUPPORTED_UPLOAD_EXTENSIONS = {".md", ".txt"}
+MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB
 
 
 # ---------- Application context (dependency-injected) ----------
@@ -39,6 +54,25 @@ def get_context(request: Request) -> AppContext:
 def init_app_context(fastapi_app: FastAPI, context: AppContext) -> None:
     """Attach a pre-built :class:`AppContext` to the app (used in tests)."""
     fastapi_app.state.ctx = context
+
+
+def set_api_key(fastapi_app: FastAPI, api_key: str | None) -> None:
+    """Configure the expected API key (``None`` disables auth)."""
+    fastapi_app.state.api_key = api_key
+
+
+def require_api_key(
+    request: Request,
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+) -> None:
+    """Dependency that enforces the ``X-API-Key`` header if auth is enabled."""
+    expected = getattr(request.app.state, "api_key", None)
+    if expected is None:
+        return  # auth disabled
+    if x_api_key is None:
+        raise HTTPException(status_code=401, detail="Missing X-API-Key header")
+    if x_api_key != expected:
+        raise HTTPException(status_code=403, detail="Invalid API key")
 
 
 def build_default_context(
@@ -99,15 +133,9 @@ class AskResponse(BaseModel):
     sources: list[SourceModel]
 
 
-class UploadRequest(BaseModel):
-    source: str = Field(..., min_length=1, description="Logical source name, e.g. filename")
-    content: str = Field(..., min_length=1)
-    chunk_size: int | None = Field(default=None, ge=1)
-    chunk_overlap: int | None = Field(default=None, ge=0)
-
-
 class UploadResponse(BaseModel):
     source: str
+    filename: str
     chunks_added: int
     ids: list[str]
 
@@ -126,6 +154,10 @@ app = FastAPI(
     version="0.1.0",
 )
 
+# Pick up API key from env so `uvicorn src.main:app` is auth-enabled out of box.
+app.state.api_key = os.environ.get("API_KEY")
+app.state.ctx = None
+
 
 @app.get("/")
 def root():
@@ -137,7 +169,11 @@ def health():
     return {"status": "ok"}
 
 
-@app.post("/ask", response_model=AskResponse)
+@app.post(
+    "/ask",
+    response_model=AskResponse,
+    dependencies=[Depends(require_api_key)],
+)
 def ask(req: AskRequest, ctx: AppContext = Depends(get_context)) -> AskResponse:
     chain = ctx.qa_chain
     if req.top_k is not None and req.top_k != chain.top_k:
@@ -160,31 +196,73 @@ def ask(req: AskRequest, ctx: AppContext = Depends(get_context)) -> AskResponse:
     )
 
 
-@app.post("/upload", response_model=UploadResponse)
-def upload(req: UploadRequest, ctx: AppContext = Depends(get_context)) -> UploadResponse:
+@app.post(
+    "/upload",
+    response_model=UploadResponse,
+    dependencies=[Depends(require_api_key)],
+)
+async def upload(
+    file: UploadFile = File(...),
+    source: str | None = Form(default=None),
+    chunk_size: int | None = Form(default=None),
+    chunk_overlap: int | None = Form(default=None),
+    ctx: AppContext = Depends(get_context),
+) -> UploadResponse:
+    filename = file.filename or ""
+    ext = Path(filename).suffix.lower()
+    if ext not in SUPPORTED_UPLOAD_EXTENSIONS:
+        raise HTTPException(
+            status_code=415,
+            detail=f"Unsupported file type '{ext}'. Allowed: {sorted(SUPPORTED_UPLOAD_EXTENSIONS)}",
+        )
+
+    raw = await file.read()
+    if len(raw) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large: {len(raw)} bytes > {MAX_UPLOAD_BYTES}",
+        )
+    try:
+        content = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=400, detail="File is not valid UTF-8") from exc
+    if not content.strip():
+        raise HTTPException(status_code=400, detail="File is empty")
+
     chunk_kwargs: dict[str, Any] = {}
-    if req.chunk_size is not None:
-        chunk_kwargs["chunk_size"] = req.chunk_size
-    if req.chunk_overlap is not None:
-        chunk_kwargs["chunk_overlap"] = req.chunk_overlap
+    if chunk_size is not None:
+        chunk_kwargs["chunk_size"] = chunk_size
+    if chunk_overlap is not None:
+        chunk_kwargs["chunk_overlap"] = chunk_overlap
 
     try:
-        chunks = chunk_text(req.content, **chunk_kwargs)
+        chunks = chunk_text(content, **chunk_kwargs)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     if not chunks:
-        raise HTTPException(status_code=400, detail="No chunks produced from content")
+        raise HTTPException(status_code=400, detail="No chunks produced from file")
 
-    ids = [f"{req.source}::chunk-{i}" for i in range(len(chunks))]
+    source_name = source or filename
+    ids = [f"{source_name}::chunk-{i}" for i in range(len(chunks))]
     metadatas = [
-        {"source": req.source, "chunk_index": i} for i in range(len(chunks))
+        {"source": source_name, "filename": filename, "chunk_index": i}
+        for i in range(len(chunks))
     ]
     ctx.embedder.add_chunks(chunks, ids=ids, metadatas=metadatas)
-    return UploadResponse(source=req.source, chunks_added=len(chunks), ids=ids)
+    return UploadResponse(
+        source=source_name,
+        filename=filename,
+        chunks_added=len(chunks),
+        ids=ids,
+    )
 
 
-@app.get("/search", response_model=SearchResponseModel)
+@app.get(
+    "/search",
+    response_model=SearchResponseModel,
+    dependencies=[Depends(require_api_key)],
+)
 def search(
     query: str = Query(..., min_length=1),
     top_k: int = Query(DEFAULT_TOP_K, ge=1, le=50),
