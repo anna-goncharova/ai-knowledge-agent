@@ -1,13 +1,15 @@
+"""Tests for src.document_loader (LangChain-backed)."""
+
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from langchain_core.documents import Document as LCDocument
 
 from src import document_loader
 from src.document_loader import (
-    LOADERS,
+    LOADER_CLASSES,
     SUPPORTED_EXTENSIONS,
     Document,
     load_document,
@@ -84,104 +86,98 @@ def test_rst_loader_returns_raw_content(tmp_path: Path):
     assert doc.content == rst_body
 
 
-def test_rst_is_registered_in_loaders():
+def test_rst_is_registered_in_loader_classes():
+    from langchain_community.document_loaders import TextLoader
+
     assert ".rst" in SUPPORTED_EXTENSIONS
-    assert ".rst" in LOADERS
+    assert LOADER_CLASSES[".rst"] is TextLoader
 
 
-# ---------- .pdf loader (PyPDF2) ----------
+# ---------- .pdf loader (PyPDFLoader) ----------
 
 
-@dataclass
-class _FakePage:
-    _text: str
+class _FakePyPDFLoader:
+    """Stands in for ``PyPDFLoader`` — returns one LCDocument per page."""
 
-    def extract_text(self) -> str:
-        return self._text
+    pages_by_path: dict[str, list[str]] = {}
 
+    def __init__(self, file_path: str, **kwargs):
+        self.file_path = file_path
 
-class _FakePdfReader:
-    """Stands in for ``PyPDF2.PdfReader`` in tests."""
+    def load(self) -> list[LCDocument]:
+        pages = self.pages_by_path.get(
+            self.file_path, ["default page 1", "default page 2"]
+        )
+        return [
+            LCDocument(
+                page_content=text,
+                metadata={"source": self.file_path, "page": i},
+            )
+            for i, text in enumerate(pages)
+        ]
 
-    def __init__(self, source, pages_text: list[str]):
-        self.source = source
-        self.pages = [_FakePage(t) for t in pages_text]
-
-
-def _install_fake_reader(monkeypatch, pages_text: list[str]) -> list:
-    """Patch ``PyPDF2.PdfReader`` to return a FakePdfReader.
-
-    Returns a list that records the source paths PdfReader was called with.
-    """
-    calls: list = []
-
-    def _factory(source):
-        calls.append(source)
-        return _FakePdfReader(source, pages_text)
-
-    import PyPDF2
-
-    monkeypatch.setattr(PyPDF2, "PdfReader", _factory)
-    return calls
+    def lazy_load(self):
+        # DirectoryLoader uses lazy_load() under the hood.
+        yield from self.load()
 
 
-def test_pdf_loader_extracts_text_from_all_pages(tmp_path: Path, monkeypatch):
-    calls = _install_fake_reader(
-        monkeypatch,
-        pages_text=["Page one text.", "Page two text.", "Page three."],
-    )
+@pytest.fixture
+def fake_pypdf_loader(monkeypatch):
+    """Replace PyPDFLoader in both LOADER_CLASSES and the module import path."""
+    _FakePyPDFLoader.pages_by_path = {}
+    monkeypatch.setitem(LOADER_CLASSES, ".pdf", _FakePyPDFLoader)
+    monkeypatch.setattr(document_loader, "PyPDFLoader", _FakePyPDFLoader)
+    return _FakePyPDFLoader
+
+
+def test_pdf_loader_extracts_text_from_all_pages(
+    tmp_path: Path, fake_pypdf_loader
+):
     pdf_path = tmp_path / "book.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\n% fake pdf bytes")
+    fake_pypdf_loader.pages_by_path[str(pdf_path)] = [
+        "Page one text.",
+        "Page two text.",
+        "Page three.",
+    ]
 
     doc = load_document(pdf_path)
 
     assert doc.path == pdf_path
     assert doc.content == "Page one text.\nPage two text.\nPage three."
-    # PdfReader was called once with the pdf path (as str).
-    assert calls == [str(pdf_path)]
 
 
-def test_pdf_loader_handles_none_and_errors(tmp_path: Path, monkeypatch):
-    class _BrokenPage:
-        def extract_text(self):
-            raise RuntimeError("corrupt page")
-
-    class _NonePage:
-        def extract_text(self):
-            return None
-
-    class _MixedReader:
-        def __init__(self, source):
-            self.pages = [_FakePage("ok page"), _NonePage(), _BrokenPage()]
-
-    import PyPDF2
-
-    monkeypatch.setattr(PyPDF2, "PdfReader", _MixedReader)
-
-    pdf_path = tmp_path / "mixed.pdf"
+def test_pdf_loader_single_page(tmp_path: Path, fake_pypdf_loader):
+    pdf_path = tmp_path / "single.pdf"
     pdf_path.write_bytes(b"%PDF-1.4")
+    fake_pypdf_loader.pages_by_path[str(pdf_path)] = ["only page"]
+
     doc = load_document(pdf_path)
-
-    # None -> "", broken -> "". Empty lines are preserved between pages.
-    assert doc.content == "ok page\n\n"
+    assert doc.content == "only page"
 
 
-def test_pdf_loader_via_recursive_load(tmp_path: Path, monkeypatch):
-    _install_fake_reader(monkeypatch, pages_text=["hello from pdf"])
+def test_pdf_loader_via_recursive_load(tmp_path: Path, fake_pypdf_loader):
     (tmp_path / "a.md").write_text("markdown content", encoding="utf-8")
     (tmp_path / "b.rst").write_text("rst content", encoding="utf-8")
     (tmp_path / "c.pdf").write_bytes(b"%PDF-1.4")
     (tmp_path / "skip.docx").write_bytes(b"not handled")
 
+    pdf_str = str(tmp_path / "c.pdf")
+    fake_pypdf_loader.pages_by_path[pdf_str] = ["hello", "from pdf"]
+
     docs = load_documents(tmp_path)
     by_name = {d.path.name: d.content for d in docs}
     assert set(by_name) == {"a.md", "b.rst", "c.pdf"}
-    assert by_name["c.pdf"] == "hello from pdf"
+    assert by_name["c.pdf"] == "hello\nfrom pdf"
+    assert by_name["a.md"] == "markdown content"
+    assert by_name["b.rst"] == "rst content"
 
 
-def test_pdf_is_registered_in_loaders():
+def test_pdf_is_registered_in_loader_classes():
+    from langchain_community.document_loaders import PyPDFLoader
+
     assert ".pdf" in SUPPORTED_EXTENSIONS
-    assert LOADERS[".pdf"] is document_loader._load_pdf_file
+    assert LOADER_CLASSES[".pdf"] is PyPDFLoader
 
 
 # ---------- load_document dispatch ----------
